@@ -1,0 +1,1101 @@
+---
+title: "Whitefly Attraction and Disease Dynamics in Cassava Varieties"
+author: "Koissi Savi"
+date: "2024-09-26"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+The experiment aimed to investigate the relationship between cassava variety, whitefly attraction, and Cassava Mosaic Disease (CMD) dynamics. Specifically, it sought to:
+
+1.  Determine if distinct Ivorian cassava varieties differentially attract whiteflies.
+
+2. Investigate the correlation between whitefly repellence and CMD resistance.
+
+3.  Assess the impact of CMD-resistant or whitefly-repellent cassava varieties on disease dynamics.
+
+4.  Examine how virus infection influences whitefly behavior and performance.
+
+## Experimental Design
+
+The experiment utilized a Fisher block design with six Ivorian cassava varieties: Yavo (VS), Yacé (VS), Agba blé (S), Bocou 1 (S), Bonoua 34 (R), and TMS30572 (R). Plants were sown 1 meter apart, with 30 plants per plot and 30 m² plots. To minimize whitefly movement between plots, a 2-meter distance was maintained between plots.
+
+Data on whitefly presence, abundance, and disease occurrence were collected weekly starting from week 6 until week 62, when plants became less attractive to whiteflies.
+
+## Data Analysis
+
+The following sections will detail the data cleaning, exploration, and modeling processes to address the research objectives.
+
+### Data Cleaning and Exploration
+
+* **Data Import**: Load the dataset into R and inspect its structure.
+
+* **Data Cleaning**: Identify and address any missing values, outliers, or inconsistencies in the data.
+
+```{r, echo = FALSE}
+# Loading necessary libraries
+library(tidyverse)  # For data manipulation and visualization
+library(nlme)      # For mixed-effects models
+library(lme4)      # For linear mixed-effects models
+library(readxl)     # For reading Excel files
+library(corrplot)
+library(glmmTMB) #Binomial negative
+library(emmeans) #Structuration test
+library(geepack) # GEE
+library(brms) # Bayesian Model
+
+# Read dataset from Excel file
+data <- read_excel("data/data.xlsx")
+data <- data %>% 
+  rename(severity = `severity (1-5)`,
+         infType = `inf type (H/C/W)`,
+         nubInfShoots = `# inf shoots`, 
+         nubOfShoots = `# of shoots`,
+         localization= `localization (L/U/both)`,
+         leaf_distortion = `leaf distortion`, 
+         vein_clearing = `vein clearing`,
+         wfCount5leaves = `whitefly count (top 5 leaves)`)
+# Explore the data
+head(data)
+summary(data)
+str(data)
+
+
+# Select the relevant columns starting from 'severity' to the end, and filter out rows where all those are NA
+data <-  data %>%
+  rowwise() %>%
+  dplyr::filter(!all(across(severity:dieback, ~ is.na(.))))
+
+# Inspect the cleaned data
+dataClean <- data %>%
+  mutate(localization = as.factor(localization)) %>% 
+  pivot_wider(names_from = localization, 
+              values_from = localization, 
+              values_fn = length, 
+              values_fill = 0)
+
+
+dataClean <- dataClean %>% 
+  rename(
+    chlorotic_blotch = `chlorotic blotch`, 
+    symptom  = `No symptoms`, 
+    sympUpperLeaves = `Symptoms only on upper leaves`,
+    sympLowerLeaves = `Symptoms only on lower leaves` ,
+    sympUpperLowerLeaves = `Symptoms on upper and lower leaves`,
+    )
+
+dataClean <- dataClean %>%
+  mutate(
+    sympUpperLeaves = ifelse(sympUpperLowerLeaves == 1, sympUpperLeaves + 1, sympUpperLeaves),
+    sympLowerLeaves = ifelse(sympUpperLowerLeaves == 1, sympLowerLeaves + 1, sympLowerLeaves)
+  )
+
+dataClean <- dataClean[,-c(19:20)]
+
+dataClean <- dataClean %>%
+    mutate(across(mosaic:dieback, ~ replace_na(., 0))) %>%
+    mutate(wfCount5leaves = suppressWarnings(as.numeric(wfCount5leaves)))
+
+dataClean <- dataClean %>% 
+  dplyr::select(-c(vein_clearing, chlorotic_blotch , dieback))
+# Convert infType to lowercase
+# dataClean <- dataClean %>%
+#   mutate(infType = tolower(infType))
+
+# Alternatively, you could use uppercase if preferred:
+dataClean <- dataClean %>%
+  mutate(infType = toupper(infType))
+
+summary(dataClean)
+```
+
+
+* **Exploratory Data Analysis (EDA)**: Visualize the distribution of variables, identify patterns, and assess the relationships between variables.
+  * Distribution of Numeric Variables
+```{r, echo = FALSE}
+# Histogram for numeric variables
+ggplot(dataClean, aes(x = severity)) + geom_histogram(binwidth = 1, fill = "blue", color = "black") + theme_minimal()
+
+# Density plot for wfCount5leaves
+ggplot(dataClean, aes(x = wfCount5leaves)) + geom_density(fill = "lightgreen") + theme_minimal()
+
+```
+* Distribution of categorical variables 
+
+```{r, echo = FALSE}
+# Bar plot for infType
+ggplot(dataClean, aes(x = infType)) + geom_bar(fill = "lightblue", color = "black") + theme_minimal()
+
+# Bar plot for variety
+ggplot(dataClean, aes(x = variety)) + geom_bar(fill = "orange", color = "black") + theme_minimal()
+
+```
+
+* Correlation between numeric data
+
+```{r, echo = FALSE}
+# Select numeric columns for correlation
+numeric_cols <- dataClean %>%
+  select(severity, nubInfShoots, nubOfShoots, mosaic, leaf_distortion, filiform, wfCount5leaves, sympUpperLeaves, sympLowerLeaves)
+
+# Calculate correlation matrix
+cor_matrix <- cor(numeric_cols, use = "complete.obs")
+
+# Plot correlation heatmap
+
+corrplot(cor_matrix, method = "color", type = "upper", addCoef.col = "black")
+
+```
+
+* Relationships Between Variables
+
+```{r, echo=FALSE}
+
+# Scatter plot for severity vs wfCount5leaves
+ggplot(dataClean, aes(x = severity, y = wfCount5leaves)) + 
+  geom_point(color = "purple") + 
+  geom_smooth(method = "lm", se = FALSE, color = "red") + 
+  theme_minimal()
+
+# Scatter plot for nubInfShoots vs nubOfShoots
+ggplot(dataClean, aes(x = nubOfShoots, y = nubInfShoots)) + 
+  geom_point(color = "blue") + 
+  geom_smooth(method = "lm", se = FALSE, color = "green") + 
+  theme_minimal()
+
+```
+
+* Boxplots for Numerical Variables
+
+```{r, echo=FALSE}
+# Boxplot for severity by infType
+ggplot(dataClean, aes(x = infType, y = severity)) + 
+  geom_boxplot(fill = "yellow", color = "black") + 
+  theme_minimal()
+
+# Boxplot for wfCount5leaves by severity
+ggplot(dataClean, aes(x = factor(severity), y = wfCount5leaves)) + 
+  geom_boxplot(fill = "lightblue", color = "black") + 
+  theme_minimal()
+
+# Boxplot for wfCount5leaves by variety
+ggplot(dataClean, aes(x = factor(variety), y = wfCount5leaves)) + 
+  geom_boxplot(fill = "lightblue", color = "black") + 
+  theme_minimal()
+
+```
+
+*  Summary Table of Categorical Variables
+
+```{r, echo=FALSE}
+
+# Count for variety
+dataClean %>%
+  group_by(variety) %>%
+  summarise(count = n())
+
+```
+
+* Identify Outliers
+
+```{r, echo=TRUE}
+
+# Boxplot to check for outliers in wfCount5leaves
+ggplot(dataClean, aes(x = "", y = wfCount5leaves)) + 
+  geom_boxplot(fill = "cyan") + 
+  theme_minimal() + 
+  labs(title = "Outlier detection for wfCount5leaves")
+```
+
+* Remove the Outliers 
+```{r, echo=TRUE}
+dataClean %>% dplyr::select(wfCount5leaves) %>% table()
+
+# Remove rows where wfCount5leaves equals 51
+dataClean <- dataClean %>%
+  dplyr::filter(wfCount5leaves != 51)
+
+```
+
+* Visualizing Relationships Between Symptoms and Severity
+```{r, echo=TRUE}
+# Boxplot to see the relationship between severity and leaf distortion
+ggplot(dataClean, aes(x = factor(severity), y = factor(leaf_distortion))) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Severity vs Leaf Distortion")
+
+```
+
+# Objective 1: Whitefly Attraction
+
+* **Statistical Model**: Use a suitable statistical model generalized linear model to analyze the relationship between cassava variety and whitefly abundance.
+
+* **Hypothesis Testing**: Test the hypothesis that there are significant differences in whitefly attraction among the cassava varieties.
+
+    Model Selection
+    * Response Variable: wfCount5leaves (likely count data).
+    * Fixed Effect: variety (cassava variety).
+    * Random Effects: block, plant, and week.
+    
+*  **Statistical Model**: Generalized Linear Mixed Model (GLMM)
+
+Since the response variable wfCount5leaves is a count, a Poisson GLMM or negative binomial GLMM would be appropriate to model the count data. A negative binomial distribution can be used if the data are overdispersed (variance > mean).
+
+The general form of the model is:
+
+$$wfCount5leaves_{ijk} = Variety_i + (1∣Block) + (1∣Plant) + (1∣Week) + \epsilon $$
+Where:
+
+$wfCount5leaves_{ijk}$ is the whitefly count for each plant,
+$Variety_{i}$ is the fixed effect for the cassava variety,
+(1 | Block), (1 | Plant), and (1 | Week) represent the random intercepts for block, plant, and week, respectively.
+
+#  Fit the Model in R
+
+Here's how you could approach it:
+
+##  Poisson GLMM (if no overdispersion):
+
+```{r}
+# Fit the Poisson GLMM
+model <- glmer(wfCount5leaves ~ variety + 
+                 (1 | block) + (1 | plant) + (1 | week), 
+               data = dataClean, family = poisson)
+
+```
+
+## Negative Binomial GLMM (if there is overdispersion)
+```{r}
+# Fit the Negative Binomial GLMM
+model_nb <- glmmTMB(wfCount5leaves ~ variety + (1 | block) + (1 | plant) + (1 | week), 
+                    data = dataClean, family = nbinom2)
+```
+
+### Likelihood Ratio Test (LRT)
+
+We use the Akaike Information Criterion (AIC) to compare the goodness-of-fit of models. 
+
+```{r}
+AIC(model, model_nb)
+```
+The Negative Binomial model is the best fit.
+
+### Hypothesis Testing
+
+After fitting the model, we performed hypothesis testing to check for significant differences in whitefly attraction among cassava varieties
+
+```{r, echo=FALSE}
+summary(model_nb)
+```
+
+### Interpretation
+
+* Variance and Std. Dev.: These are the estimates of variability in the data due to the random effects.
+
+  * block (Intercept): Variance = 0.0335, Std.Dev. = 0.1831
+  * plant (Intercept): Variance = 0.0054, Std.Dev. = 0.0733
+  * week (Intercept): Variance = 0.1091, Std.Dev. = 0.3303
+  
+* These random effects account for unexplained variability at the levels of block, plant, and week. Larger variances suggest more variability attributed to that grouping factor. In this case, week seems to contribute the most variability, followed by block, and plant contributes the least.
+
+##### Number of groups:
+
+block: 18 groups
+plant: 30 groups
+week: 13 groups
+
+These are the number of levels for each random factor (e.g., 18 blocks, 30 plants, and 13 weeks).
+
+#### Interpretation
+
+* The model finds that different cassava varieties have a significant effect on whitefly abundance. Specifically, varietyBocou 1, varietyTMS30572, and varietyYacé have significantly lower whitefly counts compared to the baseline variety, while varietyBonoua 34 shows a marginal effect. varietyYavo does not have a significant effect.
+
+* The random effects (block, plant, and week) contribute additional variability to the model, with week showing the most substantial variation, indicating that temporal factors play a role in whitefly abundance.
+
+### Post-hoc Tests
+
+If cassava variety is significant, use pairwise comparisons (e.g., with the emmeans package) to determine which varieties differ from each other
+
+```{r, echo=TRUE}
+
+emmeans(model, pairwise ~ variety)
+
+```
+##### Interpretation
+
+* Agba blé 3 has the highest estimated mean whitefly count on the log scale (1.000), while TMS30572 has the lowest (0.487).
+* Bocou 1 and Yacé also show lower whitefly counts relative to Agba blé 3.
+  * Comparisons with a p-value < 0.05 indicate a significant difference between the two varieties.
+* Agba blé 3 - TMS30572: There is a significant difference in whitefly counts between Agba blé 3 and TMS30572 (p = 0.0191). Agba blé 3 has a significantly higher count than TMS30572.
+* Agba blé 3 - Yacé: There is a significant difference in whitefly counts between Agba blé 3 and Yacé (p = 0.0372), with Agba blé 3 having a higher count than Yacé.
+* For other pairwise comparisons (e.g., Agba blé 3 - Bocou 1, Agba blé 3 - Yavo), the p-values are not significant, indicating no statistically significant differences in whitefly counts for those pairs.
+
+### Conclusion 
+The results suggest that while some cassava varieties show significant differences in whitefly counts, the model did not capture all relevant nuances of the data. To investigate why these results occurred and how to improve your model, let's follow a systematic approach involving diagnostic checks, goodness-of-fit tests, and visualizations. Here's a detailed breakdown:
+
+* Residual Plots
+```{r, echo=FALSE}
+plot(residuals(model_nb, type = "pearson"), main="Pearson Residuals vs Fitted Values")
+
+```
+==> A roughly horizontal band of residuals with no clear pattern.
+
+* Check Overdispersion
+```{r, echo=FALSE}
+ratio <- deviance(model_nb) / df.residual(model_nb)
+print(ratio)
+
+```
+
+==> Dispersion ratio > 1 means that overdispersion exists. If this ratio is too large, the model might not be fully accounting for the variability in the data.
+
+#### Visualizations to Understand Data and Model Fit
+
+* Predicted vs Observed Counts
+```{r, echo=FALSE}
+plot(dataClean$wfCount5leaves, fitted(model_nb), 
+     main = "Observed vs Predicted Whitefly Counts",
+     xlab = "Observed Counts", ylab = "Predicted Counts")
+abline(0, 1, col="red")
+
+```
+==>The systematic deviations indicate a lack of fit or unaccounted variability.
+
+* Random Effect Variability: To visualize how much variability is being captured by these random effects.
+
+```{r, echo=FALSE}
+# Extract random effects for block
+ranef_block <- ranef(model_nb)$cond$block
+
+# Extract random effects for plant
+ranef_plant <- ranef(model_nb)$cond$plant
+
+# Extract random effects for week
+ranef_week <- ranef(model_nb)$cond$week
+
+plot(ranef_block, main = "Random Effects for Blocks", 
+     xlab = "Block", ylab = "Random Effect")
+
+plot(ranef_plant, main = "Random Effects for Plants", 
+     xlab = "Plant", ylab = "Random Effect")
+
+plot(ranef_week, main = "Random Effects for Weeks", 
+     xlab = "Week", ylab = "Random Effect")
+```
+
+* Zero-Inflation Plot
+```{r, echo=FALSE}
+barplot(table(dataClean$wfCount5leaves == 0), main = "Proportion of Zero Counts", 
+        xlab = "Zero Counts", ylab = "Frequency")
+
+```
+
+## Temporal dynamics
+
+```{r, echo=FALSE}
+
+# Optionally, let's aggregate data (mean count per week per variety)
+dataClean_agg <- dataClean %>%
+  group_by(week, variety) %>%
+  summarise(mean_count = mean(wfCount5leaves, na.rm = TRUE))
+
+# Create plot with improved aesthetics but without smoothing
+ggplot(dataClean_agg, aes(x = week, y = mean_count, color = variety, group = variety)) + 
+  geom_line(size = 1.2, alpha = 0.8) +  # Thicker, semi-transparent line
+  geom_point(size = 2) +  # Add points to see actual data
+  scale_color_brewer(palette = "Set1") +  # Set color palette
+  labs(title = "Whitefly Counts Over Time for Different Varieties", 
+       subtitle = "Mean Count per 5 Leaves",
+       x = "Week", y = "Mean Count per 5 Leaves", 
+       color = "Variety") +  # Better title and labels
+  theme_minimal(base_size = 15) +  # Clean theme with larger base size
+  theme(legend.position = "right", legend.title = element_text(face = "bold"))
+
+
+```
+
+## Zero inflated model
+
+Based on our preliminary analysis, while the negative binomial model provides a better fit than the Poisson model, it may still be susceptible to bias caused by random errors. To address the issue of overdispersion, particularly due to the high frequency of zero counts, we propose using a
+
+**zero-inflated negative binomial (ZINB) model**.
+
+```{r, echo=FALSE}
+
+# Fit the Zero-Inflated Negative Binomial model
+model_zinb <- glmmTMB(wfCount5leaves ~ variety + 
+                        (1 | block) + (1 | plant) + (1 | week), 
+                      data = dataClean, 
+                      ziformula = ~1,  # zero-inflation model with intercept
+                      family = nbinom2)
+
+# Summarize the model
+summary(model_zinb)
+AIC(model_nb, model_zinb)
+
+```
+* **Model Diagnostics and Overdispersion Check**
+
+After fitting the ZINB model, the next step is to check for overdispersion and how well the model handles bias. Overdispersion indicates that the variance is higher than expected, which is common with count data, especially when there are excess zeros.
+
+```{r,echo=FALSE}
+# Check overdispersion by calculating the dispersion ratio
+dispersion_ratio <- deviance(model_zinb) / df.residual(model_zinb)
+print(paste("Dispersion Ratio:", dispersion_ratio))
+
+# A ratio close to 1 indicates that overdispersion is properly handled
+
+```
+The Dispersion ratio is still high (1.26) after fitting the Zero-Inflated Negative Binomial (ZINB) model, it suggests that the model is still not fully accounting for the variability or bias in the data. In such cases, we need to explore more advanced strategies to handle the bias and improve model performance.
+
+
+* **Mixed-Effects Zero-Inflated Model Refinement**
+
+Zero-Inflation depending on covariates, such as plant or block.
+
+```{r, echo=FALSE}
+# Refine the zero-inflation model by adding covariates
+model_zinb_refined <- glmmTMB(wfCount5leaves ~ variety + 
+                                (1 | block) + (1 | plant) + (1 | week), 
+                              ziformula = ~ plant + week, 
+                              data = dataClean, 
+                              family = nbinom2)
+
+#summary(model_zinb_refined)
+AIC(model_zinb, model_zinb_refined)
+```
+* check for overdispersion
+```{r, echo=FALSE}
+# Check overdispersion by calculating the dispersion ratio
+dispersion_ratio_zR <- deviance(model_zinb_refined) /
+  df.residual(model_zinb_refined)
+print(paste("Dispersion Ratio:", dispersion_ratio_zR))
+
+# A ratio close to 1 indicates that overdispersion is properly handled
+
+
+```
+
+* **Add Overdispersion Parameter Explicitly**
+
+Sometimes, adding an explicit overdispersion term to the model (e.g., by modeling random intercepts that capture overdispersion) can help absorb some of the unexplained variability.
+
+```{r, echo=FALSE}
+
+# Add an explicit overdispersion term using glmmTMB
+model_zinb_overdisp <- glmmTMB(wfCount5leaves ~ variety + (1 | block) + (1 | plant) + (1 | week), 
+                               ziformula = ~ 1, 
+                               dispformula = ~1,  # Adding overdispersion term
+                               data = dataClean, 
+                               family = nbinom2)
+
+#summary(model_zinb_overdisp)
+
+AIC(model_zinb_overdisp, model_zinb_refined)
+```
+
+Even in this case the model does not handle well bias. 
+
+## Bayesian Zero-Inflated Models
+
+Bayesian approaches allow for more flexible modeling of uncertainty and bias, especially in complex models with zero inflation and overdispersion.
+
+#### Model Structure
+
+##### Random Effects:
+
+* Block: There are 4 blocks. Since blocks are an experimental unit, the random effect for the block should capture variability among the 4 blocks.
+
+* Plant: Each block contains 30 plants, so this random effect should account for individual plant variation.
+
+* Week: The data was collected every two weeks from week 6 to week 62. This random effect should capture temporal variability over the 56-week observation period.
+
+##### Fixed Effects:
+
+Variety: You have 6 varieties of Manihot, which will be a fixed effect in the model.
+
+**Priors Based on Experimental Setup**
+
+We can now set informative priors based on what we expect from the data:
+
+* **Fixed effects (variety)**: We expect variety to have a measurable effect on the response, but without strong prior knowledge, we will use a weakly informative prior.
+
+* **Random effects (block, plant, week)**: Since we know the number of blocks and plants and how the data was collected over time, we can define more appropriate priors for the random effects.
+
+* **Zero inflation**: The zero-inflation component captures the extra zeros in the count data. A weak prior can be set here, as there is likely no strong prior knowledge about how frequent zero counts are.
+
+```{r, echo=FALSE}
+
+# Define the Bayesian Zero-Inflated Negative Binomial model with more specific priors
+fit_bayesian_zinb <- brm(
+  wfCount5leaves ~ variety + (1 | block) + 
+    (1 | plant) + (1 | week),  # Fixed and random effects
+  data = dataClean,  # Your cleaned dataset
+  family = zero_inflated_negbinomial(),  # Zero-Inflated Negative Binomial family
+  prior = c(
+    set_prior("normal(0, 10)", class = "b"),  # Priors for fixed effects (variety)
+    set_prior("student_t(3, 0, 10)", class = "sd", group = "block"),  # Prior for random effect (block)
+    set_prior("student_t(3, 0, 10)", class = "sd", group = "plant"),  # Prior for random effect (plant)
+    set_prior("student_t(3, 0, 10)", class = "sd", group = "week"),  # Prior for random effect (week)
+    set_prior("beta(1, 1)", class = "zi")  # Prior for zero-inflation probability
+  ),
+  chains = 4, iter = 4000, warmup = 1000, cores = 8,  # Adjust as necessary for computational power
+  control = list(adapt_delta = 0.95)  # To ensure better convergence
+)
+
+```
+###### Model Fitting and Diagnostics
+
+Let's check the convergence and validate the fit using posterior predictive checks.
+
+```{r, echo=FALSE}
+# Define priors separately
+prior_list <- c(
+  set_prior("normal(0, 10)", class = "b"),  # Priors for fixed effects (variety)
+  set_prior("student_t(3, 0, 10)", class = "sd", group = "block"),  # Prior for random effect (block)
+  set_prior("student_t(3, 0, 10)", class = "sd", group = "plant"),  # Prior for random effect (plant)
+  set_prior("student_t(3, 0, 10)", class = "sd", group = "week"),  # Prior for random effect (week)
+  set_prior("beta(1, 1)", class = "zi")  # Prior for zero-inflation probability
+)
+
+# Fit the model with prior_list and control settings
+fit_bayesian_zinb <- brm(
+  wfCount5leaves ~ variety + (1 | block) + (1 | plant) + (1 | week),  # Fixed and random effects
+  data = dataClean,  # Your cleaned dataset
+  family = zero_inflated_negbinomial(),  # Zero-Inflated Negative Binomial family
+  prior = prior_list,  # Use the predefined priors
+  chains = 4, iter = 4000, warmup = 1000, cores = 8,  # Adjust as necessary for computational power
+  control = list(adapt_delta = 0.95)  # Ensure better convergence
+)
+
+# Posterior predictive check
+pp_check(fit_bayesian_zinb)
+
+
+```
+
+##### Model Interpretation and Bias Quantification
+
+```{r, echo=FALSE}
+summary(fit_bayesian_zinb)
+
+```
+The model's fixed effects give us information about how different cassava varieties attract whiteflies (measured by wfCount5leaves). The Intercept represents the baseline log-count of whiteflies for a reference variety (likely not shown explicitly but can be assumed to be the first variety in the dataset).
+
+For the other varieties:
+
+Bocou1: The estimate is -0.46, meaning this variety attracts fewer whiteflies compared to the reference variety. The credible interval (-0.85 to -0.04) does not include zero, so we are confident that Bocou1 has significantly lower whitefly counts.
+
+TMS30572: The estimate is -0.54, meaning it also attracts fewer whiteflies than the reference variety, with a significant reduction (credible interval: -0.94 to -0.13).
+
+Yacé: The estimate is -0.50, indicating this variety also attracts fewer whiteflies compared to the reference (credible interval: -0.90 to -0.10).
+
+Bonoua34: The estimate is -0.28, suggesting it might attract fewer whiteflies, but the credible interval (-0.67 to 0.15) includes zero, so the effect is uncertain (we can't confidently say it's different from the reference variety).
+
+Yavo: The estimate is -0.14, indicating a very small or no reduction in whitefly attraction, but since the credible interval (-0.55 to 0.27) also includes zero, the effect is uncertain.
+
+Interpretation of Varieties:
+
+TMS30572, Bocou1, and Yacé are significantly less attractive to whiteflies compared to the reference variety.
+
+Bonoua34 and Yavo might be less attractive, but the evidence isn't strong enough to say for sure.
+What the Random Effects Tell Us:
+
+Random effects capture the variability due to factors other than the varieties (like block, plant, and week). Here’s what we can conclude:
+
+Block: There is some variability in whitefly counts between different blocks where the plants are grown (sd = 0.24). This means that certain blocks attract more or fewer whiteflies than others. However, the effect is not very large.
+
+Plant: The variability between individual plants within the same variety is quite small (sd = 0.08). This indicates that while there's some difference in whitefly counts between individual plants, it's not very large.
+
+Week: The variability between weeks is larger (sd = 0.39). This suggests that the number of whiteflies changes considerably over time, with certain weeks attracting more whiteflies than others.
+
+### Summary:
+
+TMS30572, Bocou1, and Yacé are the least attractive varieties to whiteflies.
+Bonoua34 and Yavo show less attractivity, but we can't be sure based on this model.
+Block and week introduce more variability in whitefly counts than individual plants, but changes over weeks are more significant than between blocks or plants.
+This means that while varieties matter, the time of observation (weeks) also significantly impacts whitefly counts, possibly due to environmental factors like weather.
+
+
+**Random Effects Estimates**
+```{r, echo=FALSE}
+ranef(fit_bayesian_zinb)
+
+```
+Block:
+The variability between blocks is small. None of the block estimates significantly deviate from zero, as their credible intervals all include zero. This means that block does not have a significant effect on whitefly counts.
+
+Plant:
+The variability between plants is also minimal, with all estimates having credible intervals that include zero. This suggests that differences between individual plants do not significantly affect whitefly counts.
+
+Week:
+Week 6 shows the highest attractivity to whiteflies (Estimate = 0.49, credible interval: 0.26 to 0.73), followed by Week 22 and Weeks 24 and 26.
+
+Weeks 14, 30, and 36 show significantly lower whitefly counts (negative estimates, credible intervals below zero), meaning whitefly activity decreases over time.
+
+Summary:
+Week has a stronger influence on whitefly counts, with notable peaks and declines.
+Block and plant effects are negligible.
+
+**Posterior Predictive Checks**
+
+To compare the observed data with the posterior predictions. This helps you visually assess how well the model handles overdispersion and zero-inflation, and whether it captures the true data structure, including the handling of random effects.
+
+```{r, echo=FALSE}
+pp_check(fit_bayesian_zinb)
+
+```
+
+**Cross-Validation:** To evaluate the generalizability of the model, let us perform Leave-One-Out Cross-Validation (LOO-CV), which will help assess how well the model performs on unseen data and quantify how much bias might arise from overfitting or random effects.
+
+```{r, echo=FALSE}
+loo(fit_bayesian_zinb)
+```
+elpd_loo (-12431.8): The expected log pointwise predictive density (elpd_loo) is a measure of model fit. A higher (less negative) value suggests a better fit. However, this value alone is not highly interpretable without comparing it to other models.
+
+p_loo (48.0): This is the estimated effective number of parameters, indicating model complexity. A small value suggests the model is not overly complex and generalizes well.
+
+looic (24863.5): The LOO information criterion (LOOIC) is an indicator of model performance, similar to AIC or WAIC. Lower values suggest better predictive performance. Again, it is most useful when comparing to other models.
+
+MCSE of elpd_loo (0.1): The Monte Carlo standard error (MCSE) of the elpd_loo estimate is very low, indicating that the estimate is reliable and not subject to high variability.
+
+Pareto k values (< 0.7): All Pareto k estimates are below 0.7, indicating no problematic influential points. This means the LOO approximation is reliable, and there is no evidence of outliers or highly influential data points affecting the model's performance.
+
+Overall Conclusion:
+The model has a reliable fit with good predictive performance, and it is not overly complex. Since all Pareto k values are good, there are no significant issues with the model's diagnostics or influential data points.
+
+## Overview on the Bayesian methodological approach
+
+In this study, we employed a Bayesian framework to model the relationship between the dependent variable and the explanatory variables. The Bayesian approach was chosen due to its ability to incorporate prior information, handle uncertainty in parameter estimates, and provide a flexible framework for model building, particularly in the context of overdispersed and zero-inflated count data.
+
+### Model Specification
+
+The primary model we used is a Zero-Inflated Negative Binomial (ZINB) model, which is appropriate for count data with excess zeros and overdispersion. The ZINB model combines a count model (Negative Binomial) with a binary model that accounts for the excess zeros. We implemented the Bayesian version of this model using the Markov Chain Monte Carlo (MCMC) method to sample from the posterior distribution of the parameters.
+
+Formally, the model is specified as follows:
+
+* Count component: $y_i$ ~ $NegBin(\mu_i, \phi)$ where $\mu_i$ is the mean  counted whiteflies for plant $i$ and $\phi$ is the dispersion parameter. 
+
+* Zero-inflation component: $\pi_i$ ~ $Bernouilli(p_i)$ where $p_i$ is the probability of observing a structural zero (i.e., the event was guaranteed not to occur).
+
+The linear predictors for both components are modeled as: 
+
+* Count model: $log(\mu_i) = \beta_0 + \beta_1 X_{1i} + \beta_2 X_{2i} + \dots + \beta_k X_{ki}$
+
+* Zero-inflation model: $logit(p_i) = \gamma_0 + \gamma_1 Z_{1,i} + \dots + \gamma_lZ_{l,i}$
+
+Where $\beta$ and $\gamma$ are the regression coefficients, and X and Z represent the covariates for the count and zero-inflation components, respectively.
+
+#### Prior distributions
+
+In the Bayesian framework, priors were assigned to the model parameters. Non-informative or weakly informative priors were chosen to ensure that the data primarily drove the inference. Specifically, we used:
+
+* Normal priors for the regression coefficients $\beta$ and $\gamma$, centered around 0 with large variance.
+
+* Student prior for the dispersion parameter $\phi$, with hyperparameters chosen to reflect non-informative beliefs.
+
+* Uniform prior for the probability of zero-inflation $\pi$, reflecting equal likelihood for all values between 0 and 1.
+
+
+#### Model Fitting and Posterior Inference
+
+The model was fitted using MCMC sampling, implemented via the Stan package in R. We ran multiple four chains with a sufficient number of 4,000 iterations to ensure convergence. Convergence diagnostics were assessed using the Gelman-Rubin $\hat{R}$ statistic and visual inspection of trace plots. Posterior summaries, including means, credible intervals, and posterior predictive checks, were used to evaluate the model fit.
+
+#### Posterior Predictive Checks and Model Comparison
+
+To assess model adequacy, we performed posterior predictive checks by comparing simulated data from the model's posterior predictive distribution with the observed data. Discrepancies between the observed and simulated data helped identify any potential model misspecification. Additionally, we compared the Bayesian ZINB model with alternative models, such as the Generalized Estimating Equations (GEE) and frequentist ZINB, using information criteria like the WAIC (Widely Applicable Information Criterion) and LOO (Leave-One-Out) cross-validation.
+
+# Objective 2: Correlation between Repellence and CMD Resistance
+
+Correlation Analysis: Calculate correlation coefficients between whitefly abundance and CMD incidence for each cassava variety.
+Statistical Significance: Assess the statistical significance of the correlations.
+
+## Create a Binomial Variable for CMD (Cassava Mosaic Disease) Severity
+
+We created a dummy data from the variable severity, we assumed that the plant is diseased whenever the severity is equal or above severity score of 2
+
+```{r, echo=FALSE}
+dataClean <- dataClean %>%
+  mutate(cdm = if_else(severity >= 2 & severity <= 5, 1, 0))
+
+dataClean %>% 
+  head()
+```
+## Correlation Analysis Between Whitefly Abundance (wfCount5leaves) and CMD Incidence (cdm)
+
+Rather than simply calculating correlations between the two variables across time points for each variety, we:
+
+Account for time as a factor.
+
+Explore lag effects to see if whitefly abundance from earlier weeks influences CMD incidence in later weeks.
+
+Refined Approach
+
+Time-Lagged Correlation Analysis: Explore the time delay (lag effect) between whitefly abundance and CMD incidence. This could help identify if a rise in whiteflies in one week impacts CMD incidence in the following weeks.
+
+Generalized Linear Mixed Models (GLMM): To identify associations between whiteflies and CMD while accounting for the variety, block and plant using mixed-effects model where variety, block, plants are random effect and week can be incorporated as a fixed effect. This would allow generalizing the relationship across varieties and time points.
+
+Cross-correlation Analysis: Cross-correlation can help identify the optimal lag period between whitefly abundance and CMD incidence for each variety, determining when the effect of whiteflies on CMD is strongest.
+
+
+```{r, echo=FALSE}
+# correlation_results <- dataClean %>%
+#     group_by(variety, week) %>%
+#     filter(sd(wfCount5leaves,
+#               na.rm = TRUE) != 0 & sd(cdm, 
+#                                       na.rm = TRUE) != 0) %>%  # Filter out groups with zero variance
+#     summarise(correlation = ifelse(sum(!is.na(wfCount5leaves) & !is.na(cdm)) > 1, 
+#                                    cor(wfCount5leaves, cdm, use = "complete.obs"), 
+#                                    NA))
+# 
+# correlation_results
+
+# Fit a GLMM with random effects for variety, block, and plant
+glmm_binom_full <- glmer(cdm ~ wfCount5leaves + 
+                           (1 | variety) + (1 | block) + (1 | plant), 
+                         data = dataClean, 
+                         family = binomial, 
+                         na.action = na.omit)
+
+# Summary of the model
+summary(glmm_binom_full)
+
+
+```
+
+Based on the generalized linear mixed model (GLMM) fit for the association between whitefly count and Cassava Mosaic Disease (CMD) incidence, here are the conclusions:
+
+Association Between Whitefly Count and CMD:
+
+The model shows a significant positive relationship between whitefly count (wfCount5leaves) and CMD incidence (cdm).
+The coefficient for wfCount5leaves is 0.07502, with a p-value of 4.87e-08 (highly significant), indicating that as the number of whiteflies increases, the likelihood of CMD incidence also increases.
+Variety Sensitivity to CMD:
+
+The random effects for variety show a variance of 3.16940, which suggests that there are substantial differences in CMD sensitivity across the different varieties included in the study.
+This means some varieties are more sensitive to CMD than others, as indicated by the variability in the intercept across varieties.
+Influence of Random Factors:
+
+The random effects for block and plant also show significant variance, indicating that factors like the specific block where the plant is located and the individual plant characteristics also contribute to variations in CMD incidence.
+
+Specifically, the variance for block is 1.71456 and for plant is 0.08993, suggesting variability due to environmental conditions or specific plot characteristics.
+Conclusion:
+
+There is a significant positive association between whitefly abundance and CMD incidence, which holds across different varieties.
+Some varieties are indeed more sensitive to CMD than others, as shown by the variance in the variety random effect.
+
+Other random factors, such as block and plant, also play a role in determining CMD incidence, suggesting that environmental or localized conditions might impact disease spread.
+
+Overall, the analysis supports the hypothesis that whitefly abundance contributes to CMD spread, with varying susceptibility across cassava varieties. Further analysis could focus on identifying the most sensitive varieties and exploring the environmental conditions contributing to CMD incidence.
+
+###  Interaction Between Whiteflies and Varieties
+
+To uncover sensitive varieties and detect when increases in whitefly counts correspond to Cassava Mosaic Disease (CMD) incidence, we will employ a combination of statistical analysis, visualization, and model interpretation techniques. 
+
+```{r, echo=FALSE, warning=FALSE}
+modlInter <- glmer(cdm ~ wfCount5leaves * variety + 
+                     (1 | block) + (1 | plant), 
+      family = binomial, data = dataClean)
+
+summary(modlInter)
+```
+
+###### Extracting and Ordering Varieties by Effect Size
+
+To interpret and structure the effect of different variety levels on cdm
+
+```{r, echo=FALSE}
+library(emmeans)
+
+# Calculate estimated marginal means
+emm_variety <- emmeans(modlInter, ~ variety | wfCount5leaves)
+
+emm_variety_df <- as.data.frame(emm_variety)
+
+# Display the results in a sorted order
+emm_variety_ordered <- emm_variety_df[order(emm_variety_df$emmean),]
+print(emm_variety_ordered)
+
+```
+
+
+### Interaction Effect between Whitefly Count and Variety:
+
+The interaction between whitefly count per 5 leaves (wfCount5leaves) and several varieties (Bocou 1, TMS30572, Yacé) shows significant effects, suggesting that the response to whitefly abundance varies depending on the variety.
+
+Specifically, the interaction terms for Bocou 1, TMS30572, and Yacé are statistically significant:
+
+The interaction effect is negative, suggesting that for the Bocou 1 variety, the increase in whitefly count is associated with a lower probability of cassava mosaic disease (CMD).
+
+Similarly, a significant negative interaction indicates that TMS30572 has reduced CMD infection with increasing whitefly count.
+
+The fixed effects for the varieties themselves indicate that some varieties (Bocou 1, Bonoua 34, and TMS30572) have significantly lower CMD risk compared to the baseline variety (Intercept).
+
+Variety Bonoua 34 has a particularly strong negative effect (Estimate = -4.09943), indicating a high resistance to CMD.
+
+Variety TMS30572 and Bocou 1 also show strong resistance to CMD.
+
+Varieties Yacé and Yavo do not show significant differences from the baseline variety (p > 0.05).
+
+Main Effect of Whitefly Count (wfCount5leaves):
+
+The main effect of whitefly count (wfCount5leaves) is significant and positive (Estimate = 0.12729, p < 0.001). This indicates that, overall, as the whitefly count increases, the likelihood of CMD increases.
+
+However, this general trend is moderated by the interaction with specific varieties, as described above.
+
+Random Effects:
+
+The random effects for block and plant suggest there is variability in CMD risk among different blocks and plants.
+
+The standard deviation of the random intercept for block (1.061) is much larger than that for plant (0.2954), indicating greater variability at the block level compared to individual plants.
+
+Model Fit and Residuals:
+
+The AIC (4748.5) and BIC (4843.3) provide information on the model's fit. Lower values generally indicate a better fit, though comparisons to other models are needed for proper interpretation.
+
+The scaled residuals show that most residuals fall within a reasonable range, but there are some extreme values (Min = -6.0204, Max = 10.0240), which could indicate some outliers or model misspecification in certain cases.
+
+Interpretation:
+
+The model reveals that different cassava varieties exhibit varying levels of resistance to CMD when exposed to whiteflies, with some varieties (e.g., Bonoua 34, TMS30572, Bocou 1) showing stronger resistance compared to others (e.g., Yacé, Yavo).
+
+Varieties with significant negative interactions with whitefly count suggest a buffering effect, where even high whitefly counts do not lead to a substantial increase in CMD risk for these varieties.
+There is substantial block-to-block variation in CMD risk, likely reflecting environmental or management differences.
+
+###  Detect When Whitefly Count Increases Correspond to CMD
+
+Since the data is collected over time, we can analyze how changes in whitefly counts over time correlate with changes in CMD incidence for each variety.
+
+Let's create a time-lagged analysis where we check if increases in whitefly counts in one time period predict CMD incidence in subsequent time periods. This would help identify time points where whitefly increases correspond to CMD outbreaks.
+
+```{r,echo=FALSE}
+lagged_data <- dataClean %>%
+  group_by(variety, block) %>%
+  mutate(lag_wfCount = lag(wfCount5leaves)) 
+
+modlag <-  glmer(cdm ~ lag_wfCount + (1 | block) + (1 | plant),
+                 data = lagged_data,
+                 family = binomial)
+summary(modlag)
+
+```
+
+The summary of the lagged model (modlag) provides important insights into the effect of the lagged whitefly count (lag_wfCount) on the dependent variable (cdm), while accounting for random effects due to block and plant. Here's what we can conclude:
+
+Random Effects:
+
+* Block: The random intercept for the block group shows a variance of 5.3328 (Std. Dev. = 2.3093). This suggests substantial variability between blocks, indicating that block-level differences still play a significant role in the response variable (cdm).
+
+* Plant: The random intercept for plant has a variance of 0.1004 (Std. Dev. = 0.3168), which is much smaller than for block. This implies that there is relatively little variability in cdm at the plant level compared to the block level.
+
+Fixed Effects:
+
+* Intercept: The intercept estimate is -1.71665, with a p-value of 0.00193, indicating that the log-odds of cdm when lag_wfCount is zero is significantly different from zero. The negative value implies a low baseline probability of cdm in the absence of lagged whitefly counts.
+
+* Lagged Whitefly Count (lag_wfCount): The coefficient for lag_wfCount is 0.01936 with a p-value of 0.14093, indicating that this effect is not statistically significant at conventional levels (p < 0.05). The small positive estimate suggests a weak association between lagged whitefly count and cdm.
+
+However, due to the lack of significance, we cannot confidently conclude that past whitefly counts have a meaningful impact on cdm.
+
+Model Fit:
+
+The AIC for the model is 4780.4, and the residual deviance is 4772.4. Compared to the previous model, the AIC has increased, suggesting a slightly poorer fit with the adjusted model. The scaled residuals are relatively close to zero on average, but with some extreme values (Max = 9.1584), indicating possible outliers or areas of misfit.
+
+
+Overall Conclusion:
+The lagged model does not show a significant relationship between lagged whitefly count and cdm, as the lag_wfCount effect is not statistically significant. While block-level variation remains substantial, the lagged whitefly count does not appear to be a strong predictor of cdm in this adjusted model. The updated results suggest that other factors, beyond lagged whitefly counts, may be more influential in predicting cdm, or that additional lags or different predictor variables may need to be considered.
+
+Let us rethink previous model i.e., including lag_wfCount as a fixed effect while allowing its effect to vary across blocks by specifying a random slope for lag_wfCount within block. This setup aims to evaluate the lag effect by accounting for block-level variation in both the intercept and the slope of lag_wfCount.
+
+```{r, echo=FALSE}
+modlLLag <- glmer(cdm ~ lag_wfCount + (1 + lag_wfCount | block) + (1 | plant), family = binomial, data = lagged_data)
+
+summary(modlLLag)
+```
+
+**Interpretation**
+
+The fixed effect for lag_wfCount (estimate of 
+1.681×e−5) is close to zero, with no significant impact on cdm, suggesting that the overall direct effect of lag_wfCount across all observations is minimal.
+
+However, the random slope term for lag_wfCount within block (Std. Dev. = 0.1237) suggests variability in the lagged effect at the block level, indicating that some blocks may show a stronger or weaker relationship with cdm than the overall average.
+
+This model allows you to assess the lag effect without overemphasizing the block-level differences, as each block’s intercept and slope can vary independently.
+
+By including both random intercepts and slopes for block, this model accounts for block-level variability in baseline cdm levels (intercept) and in the relationship between lag_wfCount and cdm (slope). This should reduce the influence of block-level differences on the fixed effect estimate of lag_wfCount.
+
+The low correlation between the intercept and slope for block (0.01) indicates that blocks with higher or lower baseline levels of cdm do not necessarily have stronger or weaker lagged effects, suggesting that the block effect is reasonably minimized.
+
+Model output/conclusion
+
+In this model, the goal is to assess whether there is a significant lag effect of whitefly count (lag_wfCount) on the probability of cdm, with block effects minimized through the inclusion of both random intercepts and slopes for block.
+
+From the fixed effects results:
+
+The coefficient for lag_wfCount is very close to zero and statistically insignificant (p = 0.99965), suggesting that the lagged whitefly count does not have a significant effect on cdm in this context. This implies that past whitefly counts do not meaningfully influence the likelihood of cdm in this model.
+
+By allowing block to vary in both intercept and slope, we control for potential differences across blocks, ensuring that any effect of lag_wfCount on cdm is not confounded by these block-level variations. However, given the insignificance of lag_wfCount, this control does not reveal a meaningful impact of whitefly count lag on cdm under the current model conditions.
+
+
+
+
+#### Cumulative or Threshold Analysis 
+
+We can test whether CMD incidence increases when whitefly counts exceed a certain threshold by categorizing whitefly abundance into different levels (low, medium, high). This would help determine the threshold at which whitefly counts become problematic for CMD spread.
+
+```{r, echo=FALSE}
+dataClean <- dataClean %>%
+  mutate(wfCount_category = cut(wfCount5leaves, breaks = c(0, 5, 10, Inf), labels = c("low", "medium", "high")))
+
+mdlLagb <- glmer(cdm ~ wfCount_category + variety + (1 | block) + 
+                   (1 | plant), 
+                 data = dataClean, family = binomial)
+
+summary(mdlLagb)
+
+```
+
+Fixed effects:
+
+(Intercept): Estimate = 0.64117, Std. Error = 0.53592, z-value = 1.196, p-value = 0.2315
+
+The intercept is not statistically significant, indicating no strong evidence for a baseline effect when all predictor variables are set to their reference categories (for wfCount_category and variety).
+
+wfCount_category (Medium vs Low): Estimate = -0.08991, Std. Error = 0.12912, z-value = -0.696, p-value = 0.4862
+
+There is no significant difference between the medium category and the reference category (low) for whitefly count, as the p-value is not significant.
+
+wfCount_category (High vs Low): Estimate = 0.08759, Std. Error = 0.28814, z-value = 0.304, p-value = 0.7611
+
+The high category for whitefly count also does not show a significant difference compared to the low category.
+
+variety (Bocou 1 vs Reference variety): Estimate = -2.76191, Std. Error = 0.76001, z-value = -3.634, p-value = 0.000279
+
+Bocou 1 has a significant negative effect on the likelihood of cdm compared to the reference variety. This suggests that plants of the Bocou 1 variety are much less likely to exhibit the outcome (i.e., the binary response cdm).
+
+variety (Bonoua 34 vs Reference variety): Estimate = -4.22143, Std. Error = 0.78315, z-value = -5.390, p-value = 7.03e-08
+
+Bonoua 34 also has a significant negative effect on cdm, showing an even stronger decrease in the odds of cdm compared to the reference variety.
+variety (TMS30572 vs Reference variety): Estimate = -4.18982, Std. Error = 0.80133, z-value = -5.229, p-value = 1.71e-07
+
+TMS30572 also shows a significant negative effect, similar to Bonoua 34, indicating that this variety is much less likely to exhibit cdm.
+variety (Yacé vs Reference variety): Estimate = -1.77123, Std. Error = 0.75903, z-value = -2.334, p-value = 0.0196
+
+Yacé has a significant negative effect, but the magnitude of the effect is smaller than Bocou 1, Bonoua 34, and TMS30572.
+variety (Yavo vs Reference variety): Estimate = 0.82253, Std. Error = 0.75470, z-value = 1.090, p-value = 0.2758
+
+The variety Yavo does not show a significant difference from the reference variety, indicating no clear evidence of its influence on cdm.
+
+#### Key takeaways from the model:
+
+Whitefly count categories (wfCount_category):
+
+Neither the medium nor high whitefly count categories show significant effects on the response variable cdm, suggesting that the whitefly count categories do not strongly influence the likelihood of cdm.
+Variety effects:
+
+Several varieties (Bocou 1, Bonoua 34, TMS30572, Yacé) show a significant negative effect on the likelihood of cdm. This means that plants from these varieties are less likely to exhibit the outcome (cdm) compared to the reference variety.
+
+The variety Yavo does not significantly differ from the reference variety in terms of its effect on cdm.
+Random effects:
+
+There is some variability at both the plant and block levels, with the block effect having more variability (Std.Dev = 0.9113) compared to the plant effect (Std.Dev = 0.2475). This means that while individual plants contribute to variation, blocks introduce more variability in the outcome.
+
+Conclusion:
+
+Variety plays a significant role in determining the likelihood of cdm. Specifically, certain varieties like Bocou 1, Bonoua 34, and TMS30572 have much lower odds of cdm compared to the reference variety.
+
+Whitefly count does not seem to have a significant effect on the outcome, indicating that other factors (such as variety) may be more important in influencing cdm.
+
+There is a non-negligible amount of unexplained variability at the plant and block levels, suggesting that further investigation into other potential sources of variation could be worthwhile.
+
+### Visualization
+
+Heatmaps: Create heatmaps showing the relationship between whitefly counts and CMD incidence for each variety over time. This can visually reveal periods where increases in whitefly counts correspond to higher CMD incidence.
+
+```{r, echo=FALSE}
+ggplot(dataClean, aes(x = week, y = wfCount5leaves, fill = cdm)) + 
+  geom_tile() + 
+  facet_wrap(~ variety) + 
+  scale_fill_gradient(low = "blue", high = "red")
+
+```
+
+## Objective 3: Impact of Resistant Varieties on Disease Dynamics
+
+### Disease Modeling: Develop a disease transmission model to simulate the spread of CMD in different cassava varieties. 
+
+Scenario Analysis: Evaluate the impact of resistant varieties on disease prevalence and spread under various scenarios. 
+
+**This falls outside the primary scope of this analysis.**
+
+## Objective 4: Disease Progression
+
+Change in each variety
+
+```{r, echo=FALSE}
+
+# Identify score changes for each variety
+score_changes <- dataClean %>%
+  group_by(variety) %>%
+  arrange(week) %>%
+  mutate(prev_severity = lag(severity)) %>%
+  filter(severity != prev_severity) %>%
+  select(variety, week, prev_severity, severity) %>%
+  ungroup()
+
+# Preview score changes
+print(score_changes)
+
+```
+```{r, echo=FALSE}
+library(survival)
+library(survminer)
+
+# Assuming score_changes contains a 'time' column indicating the week of severity change
+# and 'event' indicating whether a change occurred (1 if yes, 0 if censored/no change),
+# and 'variety' to distinguish different plants
+
+# Fit the survival model
+surv_object <- Surv(time = score_changes$week, event = score_changes$severity)
+
+# Kaplan-Meier survival curves for each variety
+km_fit <- survfit(surv_object ~ variety, data = score_changes)
+
+# Plot Kaplan-Meier survival curves
+ggsurvplot(
+  km_fit,
+  data = score_changes,
+  pval = TRUE,            # Shows p-value for the overall survival difference
+  risk.table = TRUE,      # Adds a table showing risk set per time
+  conf.int = TRUE,        # Confidence intervals
+  palette = "Dark2",      # Color palette for varieties
+  ggtheme = theme_minimal(),
+  title = "Time to Severity Change by Variety",
+  xlab = "Weeks",
+  ylab = "Probability of No Severity Change"
+)
+
+
+
+```
+### Interpretation 
+Agba blé 3: This variety tends to experience severity changes relatively early, with half of the plants showing a shift in score by 18 weeks. The interval for these changes ranges between 14 and 20 weeks, suggesting that Agba blé 3 is more susceptible to early progression of severity symptoms.
+
+Bocou 1: With a median time of 26 weeks for severity changes, Bocou 1 shows the longest delay in symptom progression among the varieties. The 95% confidence interval, from 24 to 26 weeks, suggests this variety has a consistently slower progression of severity, making it a potentially more resilient choice where delayed symptom onset is desired.
+
+Bonoua 34: Bonoua 34 exhibits severity changes with a median time of 18 weeks. The interval is broader, between 14 and 24 weeks, indicating some variability in how this variety responds, but it generally shows an intermediate rate of severity progression.
+
+TMS30572: This variety has a median time of 21 weeks to severity change, with a range of 18 to 24 weeks. TMS30572 is slower to develop symptoms than Agba blé 3 but not as slow as Bocou 1, placing it in a moderate category for symptom progression.
+
+Yacé: The Yacé variety has a median time of 24 weeks for severity changes, with an interval between 22 and 26 weeks. Similar to Bocou 1, this variety shows a delayed severity progression, though slightly more variable, which may be beneficial for longer resilience against symptom severity.
+
+Yavo: Yavo experiences the fastest symptom progression, with a median severity change time of 12 weeks. The tight interval of 10 to 12 weeks indicates a very early and consistent onset of severity, making Yavo the most susceptible variety in this regard.
+
+
+
